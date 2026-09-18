@@ -1,0 +1,185 @@
+package com.example.service
+
+import android.content.Context
+import android.content.Intent
+import android.os.Bundle
+import android.speech.RecognitionListener
+import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import java.util.Locale
+
+class VoiceAssistantManager(
+    private val context: Context,
+    private val onResult: (String) -> Unit
+) {
+
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var textToSpeech: TextToSpeech? = null
+    private var isTtsReady = false
+
+    private val _isListening = MutableStateFlow(false)
+    val isListening: StateFlow<Boolean> = _isListening.asStateFlow()
+
+    private val _isSpeaking = MutableStateFlow(false)
+    val isSpeaking: StateFlow<Boolean> = _isSpeaking.asStateFlow()
+
+    private val _audioRms = MutableStateFlow(0f)
+    val audioRms: StateFlow<Float> = _audioRms.asStateFlow()
+
+    private val _lastSpokenText = MutableStateFlow("")
+    val lastSpokenText: StateFlow<String> = _lastSpokenText.asStateFlow()
+
+    init {
+        initTts()
+    }
+
+    private fun initTts() {
+        textToSpeech = TextToSpeech(context) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                isTtsReady = true
+                textToSpeech?.language = Locale.US
+                textToSpeech?.setPitch(1.02f)
+                textToSpeech?.setSpeechRate(1.02f)
+
+                textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        _isSpeaking.value = true
+                    }
+
+                    override fun onDone(utteranceId: String?) {
+                        _isSpeaking.value = false
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        _isSpeaking.value = false
+                    }
+                })
+            }
+        }
+    }
+
+    fun startListening(languageLocale: String = "en-US") {
+        // Stop any ongoing speech output (barge-in support)
+        stopSpeaking()
+
+        if (!SpeechRecognizer.isRecognitionAvailable(context)) {
+            return
+        }
+
+        try {
+            speechRecognizer?.destroy()
+            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
+                setRecognitionListener(object : RecognitionListener {
+                    override fun onReadyForSpeech(params: Bundle?) {
+                        _isListening.value = true
+                    }
+
+                    override fun onBeginningOfSpeech() {}
+
+                    override fun onRmsChanged(rmsdB: Float) {
+                        // Normalize -2dB..10dB to 0..1 range
+                        val norm = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+                        _audioRms.value = norm
+                    }
+
+                    override fun onBufferReceived(buffer: ByteArray?) {}
+
+                    override fun onEndOfSpeech() {
+                        _isListening.value = false
+                        _audioRms.value = 0f
+                    }
+
+                    override fun onError(error: Int) {
+                        _isListening.value = false
+                        _audioRms.value = 0f
+                    }
+
+                    override fun onResults(results: Bundle?) {
+                        _isListening.value = false
+                        _audioRms.value = 0f
+                        val matches = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        val text = matches?.firstOrNull() ?: ""
+                        if (text.isNotBlank()) {
+                            _lastSpokenText.value = text
+                            onResult(text)
+                        }
+                    }
+
+                    override fun onPartialResults(partialResults: Bundle?) {
+                        val matches = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                        val text = matches?.firstOrNull() ?: ""
+                        if (text.isNotBlank()) {
+                            _lastSpokenText.value = text
+                        }
+                    }
+
+                    override fun onEvent(eventType: Int, params: Bundle?) {}
+                })
+            }
+
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE, languageLocale)
+                putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+                putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
+            }
+            speechRecognizer?.startListening(intent)
+        } catch (_: Exception) {
+            _isListening.value = false
+        }
+    }
+
+    fun stopListening() {
+        try {
+            speechRecognizer?.stopListening()
+        } catch (_: Exception) {}
+        _isListening.value = false
+        _audioRms.value = 0f
+    }
+
+    fun speak(text: String, isHindi: Boolean = false) {
+        if (!isTtsReady || textToSpeech == null) return
+
+        // Instant interruption/barge-in
+        stopSpeaking()
+
+        val cleanText = text
+            .replace(Regex("""[*#_`~]"""), "") // strip markdown symbols for natural speech
+            .replace(Regex("""https?://\S+"""), "link")
+
+        if (isHindi) {
+            textToSpeech?.language = Locale("hi", "IN")
+        } else {
+            textToSpeech?.language = Locale.US
+        }
+
+        _isSpeaking.value = true
+        textToSpeech?.speak(
+            cleanText,
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "VYOM_UTTERANCE_${System.currentTimeMillis()}"
+        )
+    }
+
+    fun stopSpeaking() {
+        if (_isSpeaking.value) {
+            textToSpeech?.stop()
+            _isSpeaking.value = false
+        }
+    }
+
+    fun release() {
+        try {
+            speechRecognizer?.destroy()
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+        } catch (_: Exception) {}
+    }
+}

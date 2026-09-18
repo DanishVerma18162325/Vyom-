@@ -1,0 +1,6 @@
+{
+  "name": "VYOM",
+  "description": "Next-generation multimodal personal AI assistant with voice, vision, screen intelligence, and smart automations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
